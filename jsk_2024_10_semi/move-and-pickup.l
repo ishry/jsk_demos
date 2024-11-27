@@ -1,4 +1,4 @@
-;;実機動作未確認
+;;実行前に一度 $rosservice call /look_forward_in_navigation/stop を実行することで、移動時に視線を保つことができる
 (require "package://pr2eus/pr2-interface.l")
 (require "package://pr2eus/pr2.l")
 (load "package://pr2eus/pr2-interface.l")
@@ -25,7 +25,7 @@
     (let (box label)
       (setq box (car msg-conbined) label (cadr msg-conbined))
       (print (send label :name))
-      (when (or (string= (send label :name) "matchbox") (string= (send label :name) "eraser")) 
+      (when (or (string= (send label :name) "kite") (string= (send label :name) "toy") (string= (send label :name) "matchbox"))) 
 	(setq *target-coords* (send (ros::tf-pose->coords (send box :pose)) :copy-worldcoords))
 	(setq *target-dimensions* (send box :dimensions))
 	(format t "coords ~A, dimension ~A~%" (send *target-coords* :worldcoords) (* (send *target-dimensions* :x) (send *target-dimensions* :y) (send *target-dimensions* :z)))
@@ -36,17 +36,35 @@
 	  )))))
 
 
+;;腕が障害物として検知されてしまうため、なるべくカメラに移さない姿勢を採用
 (defun init-pose ()
   (send *pr2* :reset-pose)
   (send *ri* :stop-grasp :arms)
   (send *irtviewer* :draw-objects) 
-  (send *ri* :angle-vector (send *pr2* :angle-vector) 3000)
+  (send *ri* :angle-vector (send *pr2* :angle-vector) 2000)
+  (send *ri* :wait-interpolation)
+  (pr2-tuckarm-pose)
+  (send *irtviewer* :draw-objects) 
+  (send *ri* :angle-vector (send *pr2* :angle-vector) 2000)
   (send *ri* :wait-interpolation))
 
+(defun tuck-pose ()
+  (pr2-tuckarm-pose)
+  (send *irtviewer* :draw-objects) 
+  (send *ri* :angle-vector (send *pr2* :angle-vector) 2000)
+  (send *ri* :wait-interpolation))
+  
 
-(defun detect-socks-pos () 
+(defun detect-socks-pos (pos) 
   (send *target-box* :locate #f(-10000 -10000 -10000) :world) ;;*target-box*をリセット
   (ros::ros-info "start waiting for target ... ~A" (send *target-box* :worldpos))
+
+  ;;posを向く
+  (send *pr2* :head :look-at (relative-to-world-pos pos))
+  (send *irtviewer* :draw-objects)
+  (send *ri* :angle-vector (send *pr2* :angle-vector) 1000)
+  (send *ri* :wait-interpolation)
+
   (when isDebug 
     (send *target-box* :locate (v- (send *socks* :worldpos) (send *pr2* :worldpos))  :world))
   (ros::rate 10) ;; 10Hzで探索
@@ -89,7 +107,7 @@
 
   ;;物体検知
   (setq *target-box* (make-cube 100 100 100 :pos #f(-10000 -10000 -10000))) ;;*target-box*を初期化
-  (detect-socks-pos)
+  (detect-socks-pos pos)
   
   ;;ik解けるか確認
   (setq ik (send *pr2* _arm :inverse-kinematics 
@@ -105,20 +123,21 @@
 	  (x 0)
 	  (y 0))
       (when (> target-x 250) (setq x (- target-x 250)))
-      (setq y (cond ((> target-y 600) (- target-y 600))
-		    ((< target-y -600) (+ target-y 600))
+      (setq y (cond ((> target-y 550) (- target-y 550))
+		    ((< target-y -550) (+ target-y 550))
 		    (t 0)))
       ;; (if (and (= x 0) (= y 0))
       ;;     (progn(
       ;; 	     (setq unit-vector (normalize-vector (send *target-box* :worldpos)))
       ;; 	     (setq x (* 2 (elt unit-vector 0)))
-      ;; 	     (setq y (* 2 (elt unit-vector 1))))))   
-      (send *ri* :go-pos (/ x 1000) (/ y 1000) 0) ;;go-posのみ単位がメートル
+      ;; 	     (setq y (* 2 (elt unit-vector 1))))))
+      
+      (send *ri* :go-pos (/ x 1000) (/ y 1000) 0) ;;go-posのみ単位がメートル ;; :go-pos-unsafeとすると障害物は無視するが、位置精度が悪い
       (send *pr2* :translate (float-vector x y 0))
       (ros::ros-info "moved #f(~A ~A 0)" x y))
 
     ;;ik更新
-    (detect-socks-pos)
+    (detect-socks-pos pos)
     (setq ik (send *pr2* _arm :inverse-kinematics 
 		   (send (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate #f(0 0 -25)) :rotate (deg2rad 90) :y)
 		   :rotation-axis nil
@@ -254,6 +273,7 @@
 
 (setq isDebug t)
 
+(send *ri* :clear-costmap) ;; 障害物として認識したもののリセット
 (init-pose)
 (when isDebug (setq *socks* (make-coords :pos #f(400 600 70))))
 (pick-up #f(200 400 70))
@@ -261,5 +281,4 @@
 (pick-up #f(200 -400 70))
 (connect-objects)
 (throw-in)
-(init-pose)
-
+(tuck-pose)
