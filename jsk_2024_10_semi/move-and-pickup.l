@@ -1,4 +1,5 @@
 ;;実行前に一度 $rosservice call /look_forward_in_navigation/stop を実行することで、移動時に視線を保つことができる
+
 (require "package://pr2eus/pr2-interface.l")
 (require "package://pr2eus/pr2.l")
 (load "package://pr2eus/pr2-interface.l")
@@ -8,24 +9,29 @@
 
 ;;検知したboxとラベルを対応させるクラス
 (defclass box-label-synchronizer
-  :super exact-time-message-filter)
+  :super exact-time-message-filter
+  :slots (target-label-list)
+  )
 
 (defmethod box-label-synchronizer
   (:callback (box-msg label-msg)
     (print (list box-msg label-msg))
     (print (send-all (list box-msg label-msg) :header :stamp))
-    (box-cb box-msg label-msg)
+    (box-cb box-msg label-msg target-label-list)
     ))
 
+(defmethod box-label-synchronizer
+  (:set-target-label-list (label-list)
+			  (setq target-label-list label-list)))
 
 ;;コールバック関数
-(defun box-cb (box-msg label-msg)
+(defun box-cb (box-msg label-msg label-list)
   (ros::ros-info "received ~A boxes, ~A labels" (length (send box-msg :boxes)) (length (send label-msg :labels)))
   (dolist (msg-conbined (map cons #'(lambda (x y) (list  x y)) (send box-msg :boxes) (send label-msg :labels)))
     (let (box label)
       (setq box (car msg-conbined) label (cadr msg-conbined))
       (print (send label :name))
-      (when (or (string= (send label :name) "kite") (string= (send label :name) "toy") (string= (send label :name) "matchbox"))) 
+      (when (contains label-list (send label :name)) 
 	(setq *target-coords* (send (ros::tf-pose->coords (send box :pose)) :copy-worldcoords))
 	(setq *target-dimensions* (send box :dimensions))
 	(format t "coords ~A, dimension ~A~%" (send *target-coords* :worldcoords) (* (send *target-dimensions* :x) (send *target-dimensions* :y) (send *target-dimensions* :z)))
@@ -35,8 +41,16 @@
 	  (print "update target position")
 	  )))))
 
+;;listにwordが含まれていればt,含まれていなければnilを返す関数
+(defun contains (list word)
+  (let ((tmp nil))
+    (while list
+      (if (string= word (car list)) 
+          (progn (setq tmp t) (return))
+	(setq list (cdr list))))
+    tmp))
 
-;;腕が障害物として検知されてしまうため、なるべくカメラに移さない姿勢を採用
+
 (defun init-pose ()
   (send *pr2* :reset-pose)
   (send *ri* :stop-grasp :arms)
@@ -87,8 +101,9 @@
   (send coords :translate (send *pr2* :worldpos)))
   
  
-(defun pick-up (pos)
+(defun pick-up (pos label-list)
   (ros::ros-info "pick-up start")
+
   ;;ローカル変数の初期化
   (if (>(elt pos 1) 0) (setq _arm :larm) (setq _arm :rarm))
   (if (>(elt pos 1) 0) (setq _y 50) (setq _y -50)) ;;中央に持っていくときに使用
@@ -104,6 +119,9 @@
   (setq box-sync (instance box-label-synchronizer :init
 			   (list (list "/docker/detic_segmentor/output/boxes" jsk_recognition_msgs::BoundingBoxArray)
 				 (list "/docker/detic_segmentor/detected_classes" jsk_recognition_msgs::LabelArray))))
+
+  ;;検知したい物体のリストを登録
+  (send box-sync :set-target-label-list label-list) 
 
   ;;物体検知
   (setq *target-box* (make-cube 100 100 100 :pos #f(-10000 -10000 -10000))) ;;*target-box*を初期化
@@ -126,12 +144,7 @@
       (setq y (cond ((> target-y 550) (- target-y 550))
 		    ((< target-y -550) (+ target-y 550))
 		    (t 0)))
-      ;; (if (and (= x 0) (= y 0))
-      ;;     (progn(
-      ;; 	     (setq unit-vector (normalize-vector (send *target-box* :worldpos)))
-      ;; 	     (setq x (* 2 (elt unit-vector 0)))
-      ;; 	     (setq y (* 2 (elt unit-vector 1))))))
-      
+      (send *ri* :clear-costmap) ;;障害物のリセット
       (send *ri* :go-pos (/ x 1000) (/ y 1000) 0) ;;go-posのみ単位がメートル ;; :go-pos-unsafeとすると障害物は無視するが、位置精度が悪い
       (send *pr2* :translate (float-vector x y 0))
       (ros::ros-info "moved #f(~A ~A 0)" x y))
@@ -154,7 +167,7 @@
   (send *irtviewer* :draw-objects)
   (send *ri* :angle-vector (send *pr2* :angle-vector) 3000)
   (send *ri* :wait-interpolation)
-  
+
   (send *pr2* _arm :inverse-kinematics
 	(send (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate #f(0 0 100)) :rotate (deg2rad 90) :y)
 	:rotation-axis :x 
@@ -273,12 +286,11 @@
 
 (setq isDebug t)
 
-(send *ri* :clear-costmap) ;; 障害物として認識したもののリセット
 (init-pose)
 (when isDebug (setq *socks* (make-coords :pos #f(400 600 70))))
-(pick-up #f(200 400 70))
+(pick-up #f(200 400 70) (list "matchbox" "toy" "kite"))
 (when isDebug (setq *socks* (make-coords :pos #f(500 -800 70))))
-(pick-up #f(200 -400 70))
+(pick-up #f(200 -400 70) (list "matchbox" "toy" "kite"))
 (connect-objects)
 (throw-in)
 (tuck-pose)
