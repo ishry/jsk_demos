@@ -1,3 +1,4 @@
+;;移動して靴下を掴んだ後、カゴを探して入れに行くプログラム
 ;;実行前に一度 $rosservice call /look_forward_in_navigation/stop を実行することで、移動時に視線を保つことができる
 
 (require "package://pr2eus/pr2-interface.l")
@@ -20,6 +21,7 @@
     (box-cb box-msg label-msg target-label-list)
     ))
 
+;;検知したいラベルをリストで渡す
 (defmethod box-label-synchronizer
   (:set-target-label-list (label-list)
 			  (setq target-label-list label-list)))
@@ -79,7 +81,7 @@
   (send *ri* :angle-vector (send *pr2* :angle-vector) 1000)
   (send *ri* :wait-interpolation)
 
-  (when isDebug 
+  (when *is-debug* 
     (send *target-box* :locate (v- (send *socks* :worldpos) (send *pr2* :worldpos))  :world))
   (ros::rate 10) ;; 10Hzで探索
   (while (or (> (elt (send *target-box* :worldpos) 2) 400)
@@ -104,11 +106,9 @@
 (defun pick-up (pos label-list)
   (ros::ros-info "pick-up start")
 
-  ;;ローカル変数の初期化
-  (if (>(elt pos 1) 0) (setq _arm :larm) (setq _arm :rarm))
-  (if (>(elt pos 1) 0) (setq _y 50) (setq _y -50)) ;;中央に持っていくときに使用
-  (if (>(elt pos 1) 0) (setq _theta -90) (setq _theta 90)) ;;中央に持っていくときに使用
-
+  ;;物体の位置に応じて使う腕を変更
+  (if (>(elt pos 1) 0) (setq *arm* :larm) (setq *arm* :rarm))
+  
   ;;posを見る
   (send *pr2* :head :look-at (relative-to-world-pos pos))
   (send *irtviewer* :draw-objects)
@@ -123,81 +123,101 @@
   ;;検知したい物体のリストを登録
   (send box-sync :set-target-label-list label-list) 
 
-  ;;物体検知
-  (setq *target-box* (make-cube 100 100 100 :pos #f(-10000 -10000 -10000))) ;;*target-box*を初期化
-  (detect-socks-pos pos)
-  
-  ;;ik解けるか確認
-  (setq ik (send *pr2* _arm :inverse-kinematics 
-	(send (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate #f(0 0 -25)) :rotate (deg2rad 90) :y)
-	:rotation-axis nil
-	:debug-view nil))
+  ;;*target-box*を初期化
+  ;;detect-socks-pos　を実行すると、*target-box*が検知した物体の位置に移動
+  (setq *target-box* (make-cube 100 100 100 :pos #f(-10000 -10000 -10000)))
 
-  ;;ik解けなければ移動
-  (while (not ik)
-    (ros::ros-info "ik failed. start moving")
+  ;;pickupが成功したかどうかの判定用変数
+  (setq *is-pickup-successful* nil)
+
+  (while (not *is-pickup-successful*)
+    (detect-socks-pos pos)
+    (ros::ros-info "start moving")
     (let ((target-x (elt (send *target-box* :worldpos) 0))
 	  (target-y (elt (send *target-box* :worldpos) 1))
 	  (x 0)
 	  (y 0))
-      (when (> target-x 250) (setq x (- target-x 250)))
-      (setq y (cond ((> target-y 550) (- target-y 550))
-		    ((< target-y -550) (+ target-y 550))
-		    (t 0)))
+      (setq x (- target-x 200))
+      (if (> target-y 0) (setq y (- target-y 550)) (setq y (+ target-y 550)))
       (send *ri* :clear-costmap) ;;障害物のリセット
-      (send *ri* :go-pos (/ x 1000) (/ y 1000) 0) ;;go-posのみ単位がメートル ;; :go-pos-unsafeとすると障害物は無視するが、位置精度が悪い
+      (send *ri* :go-pos (/ x 1000) (/ y 1000) 0) ;;go-posのみ単位がメートル ;; go-posの第三引数は回転角度(degree)
       (send *pr2* :translate (float-vector x y 0))
       (ros::ros-info "moved #f(~A ~A 0)" x y))
+    (ros::ros-info "finish moving")
 
-    ;;ik更新
+    ;;再びターゲットの位置を特定
     (detect-socks-pos pos)
-    (setq ik (send *pr2* _arm :inverse-kinematics 
-		   (send (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate #f(0 0 -25)) :rotate (deg2rad 90) :y)
-		   :rotation-axis nil
-		   :debug-view nil)))
-  
-  ;;ik完了
-  (ros::ros-info "ik succeeded. start glasping at ~A~%" (send *target-box* :copy-worldcoords)) 
 
-  ;;上から靴下を掴む軌道の生成  
-  (send *pr2* _arm :inverse-kinematics
-	(send (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate #f(0 0 300)) :rotate (deg2rad 90) :y)
-	:rotation-axis :x  
-	:debug-view nil)
-  (send *irtviewer* :draw-objects)
-  (send *ri* :angle-vector (send *pr2* :angle-vector) 3000)
-  (send *ri* :wait-interpolation)
+    ;;pickup開始
+    (ros::ros-info "start glasping at ~A~%" (send *target-box* :copy-worldcoords))
 
-  (send *pr2* _arm :inverse-kinematics
-	(send (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate #f(0 0 100)) :rotate (deg2rad 90) :y)
-	:rotation-axis :x 
-	:debug-view nil)
-  (send *irtviewer* :draw-objects)
-  (send *ri* :angle-vector (send *pr2* :angle-vector) 3000)
-  (send *ri* :wait-interpolation)
+    ;;上から靴下を掴む軌道の生成  
+    (send *pr2* *arm* :inverse-kinematics
+    	  (send (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate #f(0 0 300)) :rotate (deg2rad 90) :y)
+    	  :rotation-axis :x
+    	  :debug-view nil)
+    (send *irtviewer* :draw-objects)
+    (send *ri* :angle-vector (send *pr2* :angle-vector) 3000)
+    (send *ri* :wait-interpolation)
+    
+    (send *pr2* *arm* :inverse-kinematics
+    	  (send (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate #f(0 0 100)) :rotate (deg2rad 90) :y)
+    	  :rotation-axis :x
+    	  :debug-view nil)
+    (send *irtviewer* :draw-objects)
+    (send *ri* :angle-vector (send *pr2* :angle-vector) 3000)
+    (send *ri* :wait-interpolation)
 
-  (send *pr2* _arm :inverse-kinematics
-	(send (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate #f(0 0 -25)) :rotate (deg2rad 90) :y)
-	:rotation-axis nil
-	:debug-view nil)
-  (send *irtviewer* :draw-objects)
-  (send *ri* :angle-vector (send *pr2* :angle-vector) 3000)
-  (send *ri* :wait-interpolation)
-      
-  ;;掴む
-  (send *ri* :start-grasp _arm :wait t) ;;graspとspeakは:wait t が必要
-  (send *irtviewer* :draw-objects)
-  (send *ri* :angle-vector (send *pr2* :angle-vector) 1000)
-  (send *ri* :wait-interpolation)
+    (send *pr2* *arm* :inverse-kinematics
+	  (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate #f(0 0 -25))
+	  :rotation-axis :y
+	  :debug-view nil)
+    (send *irtviewer* :draw-objects)
+    (send *ri* :angle-vector (send *pr2* :angle-vector) 3000)
+    (send *ri* :wait-interpolation)
+    
+    ;;掴む
+    (send *ri* :start-grasp *arm* :wait t) ;;graspとspeakは:wait t が必要
+    (send *irtviewer* :draw-objects)
+    (send *ri* :angle-vector (send *pr2* :angle-vector) 1000)
+    (send *ri* :wait-interpolation)
 
-  (send *pr2* _arm :inverse-kinematics
-	(send (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate #f(0 0 300)) :rotate (deg2rad 90) :y)
-	:rotation-axis nil
-	:look-at-target t
-	:debug-view nil)
-  (send *irtviewer* :draw-objects)
-  (send *ri* :angle-vector (send *pr2* :angle-vector) 3000)
-  (send *ri* :wait-interpolation))
+    ;;少し持ち上げる
+    (send *pr2* *arm* :inverse-kinematics
+	  (send (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate #f(0 0 300)) :rotate (deg2rad 90) :y)
+	  :rotation-axis :x
+	  :look-at-target t
+	  :debug-view nil)
+    (send *irtviewer* :draw-objects)
+    (send *ri* :angle-vector (send *pr2* :angle-vector) 2000)
+    (send *ri* :wait-interpolation)
+    
+    ;;掴めたかどうか確認
+    (ros::ros-info "check whether the pickup was succcessful ~%")    
+    (ros::ros-info "joint angle =  ~A~%" (send *ri* :robot *arm* :gripper :joint-angle))
+    (setq *is-pickup-successful* (> (send *ri* :robot *arm* :gripper :joint-angle) 5))
+    (when *is-debug* (setq *is-pickup-successful* t))
+
+    ;;つかめなかったら掴み直す準備をする
+    (when (not *is-pickup-successful*)
+      (ros::ros-info "pickup failed... ~%")
+      (ros::ros-info "retry pickup ~%")
+      ;;手を開く
+      (send *ri* :stop-grasp *arm*)
+      (send *irtviewer* :draw-objects) 
+      (send *ri* :angle-vector (send *pr2* :angle-vector) 2000)
+      (send *ri* :wait-interpolation)
+      ;;腕を移動させて見やすくする
+      (let (y)
+	(if (>(elt pos 1) 0) (setq y 200) (setq y -200)) 
+	(send *pr2* *arm* :inverse-kinematics
+	      (send (send (relative-to-world-coords (send *target-box* :copy-worldcoords)) :translate (float-vector -200 y 300)) :rotate (deg2rad 90) :y)
+	      :rotation-axis nil
+	      :debug-view nil)
+	(send *irtviewer* :draw-objects)
+	(send *ri* :angle-vector (send *pr2* :angle-vector) 2000)
+	(send *ri* :wait-interpolation)))
+    ))
 
 
 (defun connect-objects ()
@@ -251,6 +271,39 @@
   (send *ri* :angle-vector (send *pr2* :angle-vector) 2000)
   (send *ri* :wait-interpolation))
 
+(defun search-basket (label-list)
+  (ros::ros-info "start searching for basket")
+
+  ;;前を見る
+  (send *pr2* :head :look-at (relative-to-world-pos #f(400 0 400)))
+  (send *irtviewer* :draw-objects)
+  (send *ri* :angle-vector (send *pr2* :angle-vector) 1000)
+  (send *ri* :wait-interpolation)
+
+  ;;subscribe 
+  (setq box-sync (instance box-label-synchronizer :init
+			   (list (list "/docker/detic_segmentor/output/boxes" jsk_recognition_msgs::BoundingBoxArray)
+				 (list "/docker/detic_segmentor/detected_classes" jsk_recognition_msgs::LabelArray))))
+
+  ;;検知したい物体のリストを登録
+  (send box-sync :set-target-label-list label-list) 
+
+  ;;物体検知　正面を向いただけで見つかる想定
+  ;;*target-box*を初期化
+  (setq *target-box* (make-cube 100 100 100 :pos #f(-10000 -10000 -10000))) 
+  (detect-socks-pos #f(800 0 0))
+
+
+  ;;カゴが前方800mmの位置に来るように移動
+  (let ((x 0) (y 0) (move-vector #f(0 0 0)))
+    (send *ri* :clear-costmap) 
+    (setq move-vector (v- (send (send *target-box* :copy-worldcoords) :worldpos) #f(800 0 0)))
+    (setq x (elt move-vector 0))
+    (setq y (elt move-vector 1))
+    (send *ri* :go-pos (/ x 1000) (/ y 1000) 0)
+    (send *pr2* :translate (float-vector x y 0))
+    (ros::ros-info "moved #f(~A ~A 0)" x y)))
+
 
 (defun throw-in ()
   ;;右腕の移動
@@ -284,13 +337,15 @@
 (setq *ri* (instance pr2-interface :init))
 (objects (list *pr2*))
 
-(setq isDebug t)
+(setq *is-debug* nil)
 
 (init-pose)
-(when isDebug (setq *socks* (make-coords :pos #f(400 600 70))))
+(when *is-debug* (setq *socks* (make-coords :pos #f(400 600 70))))
 (pick-up #f(200 400 70) (list "matchbox" "toy" "kite"))
-(when isDebug (setq *socks* (make-coords :pos #f(500 -800 70))))
+(when *is-debug* (setq *socks* (make-coords :pos #f(500 -800 70))))
 (pick-up #f(200 -400 70) (list "matchbox" "toy" "kite"))
 (connect-objects)
+(when *is-debug* (setq *socks* (make-coords :pos #f(1500 0 70))))
+(search-basket (list "plastic_bag" "handbag"))
 (throw-in)
 (tuck-pose)
